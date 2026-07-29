@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Focus</string>
+    <string name="accessibility_service_label">Focus Blocker</string>
+    <string name="accessibility_service_description">Monitors Chrome to help you stay focused by blocking addictive short-form content (YouTube Shorts and Instagram Reels).</string>
+</resources>
