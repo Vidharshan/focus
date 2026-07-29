@@ -16,15 +16,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -37,6 +39,7 @@ class MainActivity : ComponentActivity() {
 
     private var isServicePermissionGranted by mutableStateOf(false)
     private var isBlockerEnabled by mutableStateOf(true)
+    private var isPinLocked by mutableStateOf(false)
     private var blockedPatterns by mutableStateOf(setOf<String>())
     private var blockLogs by mutableStateOf(listOf<BlockLog>())
 
@@ -46,34 +49,104 @@ class MainActivity : ComponentActivity() {
         
         setContent {
             FocusTheme {
+                var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+                var showVerifyDialog by remember { mutableStateOf(false) }
+                var showSetPinDialog by remember { mutableStateOf(false) }
+                var showAddDialog by remember { mutableStateOf(false) }
+
+                // Unified action interceptor that checks if PIN is active
+                val runWithLockCheck = { action: () -> Unit ->
+                    if (FocusPreferences.isPinLocked(this)) {
+                        pendingAction = action
+                        showVerifyDialog = true
+                    } else {
+                        action()
+                    }
+                }
+
                 MainScreen(
                     isServicePermissionGranted = isServicePermissionGranted,
                     isBlockerEnabled = isBlockerEnabled,
+                    isPinLocked = isPinLocked,
                     blockedPatterns = blockedPatterns,
                     blockLogs = blockLogs,
                     onToggleBlocker = { enabled ->
-                        FocusPreferences.setBlockerEnabled(this, enabled)
-                        isBlockerEnabled = enabled
+                        runWithLockCheck {
+                            FocusPreferences.setBlockerEnabled(this, enabled)
+                            isBlockerEnabled = enabled
+                        }
                     },
                     onRequestPermission = {
                         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                         startActivity(intent)
                     },
-                    onAddPattern = { pattern ->
-                        if (FocusPreferences.addBlockedPattern(this, pattern)) {
-                            refreshData()
+                    onAddPatternClick = {
+                        runWithLockCheck {
+                            showAddDialog = true
                         }
                     },
                     onRemovePattern = { pattern ->
-                        if (FocusPreferences.removeBlockedPattern(this, pattern)) {
-                            refreshData()
+                        runWithLockCheck {
+                            if (FocusPreferences.removeBlockedPattern(this, pattern)) {
+                                refreshData()
+                            }
                         }
                     },
                     onClearLogs = {
-                        dbHelper.clearAllLogs()
-                        refreshData()
+                        runWithLockCheck {
+                            dbHelper.clearAllLogs()
+                            refreshData()
+                        }
+                    },
+                    onSetupPinClick = {
+                        showSetPinDialog = true
+                    },
+                    onRemovePinClick = {
+                        runWithLockCheck {
+                            FocusPreferences.clearPin(this)
+                            refreshData()
+                        }
                     }
                 )
+
+                // Dialog overlays
+                if (showVerifyDialog) {
+                    VerifyPinDialog(
+                        onDismiss = {
+                            showVerifyDialog = false
+                            pendingAction = null
+                        },
+                        onVerifySuccess = {
+                            showVerifyDialog = false
+                            pendingAction?.invoke()
+                            pendingAction = null
+                            refreshData()
+                        }
+                    )
+                }
+
+                if (showSetPinDialog) {
+                    SetPinDialog(
+                        onDismiss = { showSetPinDialog = false },
+                        onPinCreated = { pin ->
+                            FocusPreferences.setPin(this, pin)
+                            showSetPinDialog = false
+                            refreshData()
+                        }
+                    )
+                }
+
+                if (showAddDialog) {
+                    AddPatternDialog(
+                        onDismiss = { showAddDialog = false },
+                        onAdd = { pattern ->
+                            if (FocusPreferences.addBlockedPattern(this, pattern)) {
+                                refreshData()
+                            }
+                            showAddDialog = false
+                        }
+                    )
+                }
             }
         }
     }
@@ -86,6 +159,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshData() {
         isServicePermissionGranted = isAccessibilityServiceEnabled(this)
         isBlockerEnabled = FocusPreferences.isBlockerEnabled(this)
+        isPinLocked = FocusPreferences.isPinLocked(this)
         blockedPatterns = FocusPreferences.getBlockedPatterns(this)
         blockLogs = dbHelper.getRecentLogs()
     }
@@ -110,7 +184,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// Sleek Dark Theme Color Palette
+// Dark Theme Color Palette
 val DarkBg = Color(0xFF0B0C10)
 val SurfaceCard = Color(0xFF14161F)
 val BorderColor = Color(0xFF1E212E)
@@ -139,16 +213,17 @@ fun FocusTheme(content: @Composable () -> Unit) {
 fun MainScreen(
     isServicePermissionGranted: Boolean,
     isBlockerEnabled: Boolean,
+    isPinLocked: Boolean,
     blockedPatterns: Set<String>,
     blockLogs: List<BlockLog>,
     onToggleBlocker: (Boolean) -> Unit,
     onRequestPermission: () -> Unit,
-    onAddPattern: (String) -> Unit,
+    onAddPatternClick: () -> Unit,
     onRemovePattern: (String) -> Unit,
-    onClearLogs: () -> Unit
+    onClearLogs: () -> Unit,
+    onSetupPinClick: () -> Unit,
+    onRemovePinClick: () -> Unit
 ) {
-    var showAddDialog by remember { mutableStateOf(false) }
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -185,12 +260,21 @@ fun MainScreen(
                 )
             }
 
+            // Guardian Lock PIN Mode Card
+            item {
+                GuardianLockCard(
+                    isPinLocked = isPinLocked,
+                    onSetupPinClick = onSetupPinClick,
+                    onRemovePinClick = onRemovePinClick
+                )
+            }
+
             // Patterns Configuration Card
             item {
                 PatternsCard(
                     patterns = blockedPatterns,
                     onRemovePattern = onRemovePattern,
-                    onAddPatternClick = { showAddDialog = true }
+                    onAddPatternClick = onAddPatternClick
                 )
             }
 
@@ -235,17 +319,6 @@ fun MainScreen(
                 Spacer(modifier = Modifier.height(20.dp))
             }
         }
-
-        // Dialog for adding a pattern
-        if (showAddDialog) {
-            AddPatternDialog(
-                onDismiss = { showAddDialog = false },
-                onAdd = { pattern ->
-                    onAddPattern(pattern)
-                    showAddDialog = false
-                }
-            )
-        }
     }
 }
 
@@ -287,7 +360,6 @@ fun StatusCard(
             Row(
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Animated-like glowing orb
                 Box(
                     modifier = Modifier
                         .size(12.dp)
@@ -351,6 +423,67 @@ fun StatusCard(
 }
 
 @Composable
+fun GuardianLockCard(
+    isPinLocked: Boolean,
+    onSetupPinClick: () -> Unit,
+    onRemovePinClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, BorderColor, RoundedCornerShape(16.dp)),
+        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp)
+        ) {
+            Text(
+                "Guardian Lock",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            if (isPinLocked) {
+                Text(
+                    "Lock is ACTIVE. Changing rules, pausing the blocker, or clearing history requires entering the Guardian PIN.",
+                    color = AccentGreen,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = onRemovePinClick,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = AlertRed.copy(alpha = 0.8f)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Remove PIN Lock", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            } else {
+                Text(
+                    "Let someone else set a PIN to prevent yourself from pausing the blocker or deleting restricted URL rules.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = onSetupPinClick,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo.copy(alpha = 0.8f)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Set Guardian PIN", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun PatternsCard(
     patterns: Set<String>,
     onRemovePattern: (String) -> Unit,
@@ -397,7 +530,6 @@ fun PatternsCard(
                     fontSize = 13.sp
                 )
             } else {
-                // Render patterns as a flow grid of chips
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     patterns.forEach { pattern ->
                         Row(
@@ -416,7 +548,7 @@ fun PatternsCard(
                                 fontFamily = FontFamily.Monospace
                             )
                             Icon(
-                                imageVector = androidx.compose.material3.assist.defaultDeleteIcon(), // fallback or standard representation
+                                imageVector = androidx.compose.material3.assist.defaultDeleteIcon(),
                                 contentDescription = "Delete Pattern",
                                 tint = AlertRed.copy(alpha = 0.8f),
                                 modifier = Modifier
@@ -431,7 +563,6 @@ fun PatternsCard(
     }
 }
 
-// Fallback extension to get a delete icon without importing complex vector asset packs
 fun androidx.compose.material3.assist.defaultDeleteIcon(): androidx.compose.ui.graphics.vector.ImageVector {
     return androidx.compose.ui.graphics.vector.ImageVector.Builder(
         name = "DeleteIcon",
@@ -634,6 +765,208 @@ fun AddPatternDialog(
                         colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo)
                     ) {
                         Text("Add", color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SetPinDialog(
+    onDismiss: () -> Unit,
+    onPinCreated: (String) -> Unit
+) {
+    var pin by remember { mutableStateOf("") }
+    var confirmPin by remember { mutableStateOf("") }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, BorderColor, RoundedCornerShape(16.dp)),
+            colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    "Set Guardian PIN",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+
+                Text(
+                    "Enter a 4-digit PIN. Make sure someone else knows it (or a partner sets it) so you cannot bypass the blocker settings.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+
+                OutlinedTextField(
+                    value = pin,
+                    onValueChange = {
+                        if (it.length <= 4 && it.all { char -> char.isDigit() }) {
+                            pin = it
+                            errorText = null
+                        }
+                    },
+                    label = { Text("4-digit PIN", color = TextSecondary) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    visualTransformation = PasswordVisualTransformation(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        focusedBorderColor = PrimaryIndigo,
+                        unfocusedBorderColor = BorderColor
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = confirmPin,
+                    onValueChange = {
+                        if (it.length <= 4 && it.all { char -> char.isDigit() }) {
+                            confirmPin = it
+                            errorText = null
+                        }
+                    },
+                    label = { Text("Confirm PIN", color = TextSecondary) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    visualTransformation = PasswordVisualTransformation(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        focusedBorderColor = PrimaryIndigo,
+                        unfocusedBorderColor = BorderColor
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (errorText != null) {
+                    Text(errorText!!, color = AlertRed, fontSize = 12.sp)
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancel", color = TextSecondary)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            if (pin.length != 4) {
+                                errorText = "PIN must be exactly 4 digits."
+                            } else if (pin != confirmPin) {
+                                errorText = "PINs do not match."
+                            } else {
+                                onPinCreated(pin)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo)
+                    ) {
+                        Text("Save", color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VerifyPinDialog(
+    onDismiss: () -> Unit,
+    onVerifySuccess: () -> Unit
+) {
+    var pin by remember { mutableStateOf("") }
+    var isError by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, BorderColor, RoundedCornerShape(16.dp)),
+            colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    "Enter Guardian PIN",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+
+                Text(
+                    "This action is locked by the Guardian. Please enter the 4-digit PIN to authorize changes.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+
+                OutlinedTextField(
+                    value = pin,
+                    onValueChange = {
+                        if (it.length <= 4 && it.all { char -> char.isDigit() }) {
+                            pin = it
+                            isError = false
+                        }
+                    },
+                    isError = isError,
+                    label = { Text("Enter PIN", color = TextSecondary) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    visualTransformation = PasswordVisualTransformation(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        focusedBorderColor = PrimaryIndigo,
+                        unfocusedBorderColor = BorderColor,
+                        errorBorderColor = AlertRed
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (isError) {
+                    Text("Incorrect PIN. Please try again.", color = AlertRed, fontSize = 12.sp)
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancel", color = TextSecondary)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            if (FocusPreferences.verifyPin(context, pin)) {
+                                onVerifySuccess()
+                            } else {
+                                isError = true
+                                pin = ""
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo)
+                    ) {
+                        Text("Verify", color = Color.White)
                     }
                 }
             }

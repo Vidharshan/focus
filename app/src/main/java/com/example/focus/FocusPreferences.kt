@@ -7,6 +7,7 @@ object FocusPreferences {
     private const val PREFS_NAME = "focus_blocker_prefs"
     private const val KEY_ENABLED = "blocker_enabled"
     private const val KEY_PATTERNS = "blocked_patterns"
+    private const val KEY_PIN = "guardian_pin"
 
     private val DEFAULT_PATTERNS = setOf(
         "youtube.com/shorts",
@@ -51,5 +52,24 @@ object FocusPreferences {
             return true
         }
         return false
+    }
+
+    // Guardian Lock PIN Management
+    fun isPinLocked(context: Context): Boolean {
+        val pin = getPrefs(context).getString(KEY_PIN, null)
+        return !pin.isNullOrEmpty()
+    }
+
+    fun verifyPin(context: Context, input: String): Boolean {
+        val storedPin = getPrefs(context).getString(KEY_PIN, "")
+        return storedPin == input.trim()
+    }
+
+    fun setPin(context: Context, pin: String) {
+        getPrefs(context).edit().putString(KEY_PIN, pin.trim()).apply()
+    }
+
+    fun clearPin(context: Context) {
+        getPrefs(context).edit().remove(KEY_PIN).apply()
     }
 }
