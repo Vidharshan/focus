@@ -547,13 +547,14 @@ fun PatternsCard(
                                 fontSize = 14.sp,
                                 fontFamily = FontFamily.Monospace
                             )
-                            Icon(
-                                imageVector = defaultDeleteIcon(),
-                                contentDescription = "Delete Pattern",
-                                tint = AlertRed.copy(alpha = 0.8f),
+                            Text(
+                                text = "✕",
+                                color = AlertRed.copy(alpha = 0.8f),
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
                                 modifier = Modifier
-                                    .size(18.dp)
                                     .clickable { onRemovePattern(pattern) }
+                                    .padding(4.dp)
                             )
                         }
                     }
@@ -561,37 +562,6 @@ fun PatternsCard(
             }
         }
     }
-}
-
-fun defaultDeleteIcon(): androidx.compose.ui.graphics.vector.ImageVector {
-    return androidx.compose.ui.graphics.vector.ImageVector.Builder(
-        name = "DeleteIcon",
-        defaultWidth = 24.dp,
-        defaultHeight = 24.dp,
-        viewportWidth = 24f,
-        viewportHeight = 24f
-    ).apply {
-        path(
-            fill = null,
-            stroke = androidx.compose.ui.graphics.vector.SolidColor(Color.White),
-            strokeLineWidth = 2f
-        ) {
-            moveTo(3f, 6f)
-            lineTo(21f, 6f)
-            moveTo(19f, 6f)
-            lineTo(19f, 19f)
-            arcTo(2f, 2f, 0f, false, true, 17f, 21f)
-            lineTo(7f, 21f)
-            arcTo(2f, 2f, 0f, false, true, 5f, 19f)
-            lineTo(5f, 6f)
-            moveTo(8f, 6f)
-            lineTo(8f, 4f)
-            arcTo(2f, 2f, 0f, false, true, 10f, 2f)
-            lineTo(14f, 2f)
-            arcTo(2f, 2f, 0f, false, true, 16f, 4f)
-            lineTo(16f, 6f)
-        }
-    }.build()
 }
 
 @Composable
