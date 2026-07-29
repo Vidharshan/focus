@@ -548,7 +548,7 @@ fun PatternsCard(
                                 fontFamily = FontFamily.Monospace
                             )
                             Icon(
-                                imageVector = androidx.compose.material3.assist.defaultDeleteIcon(),
+                                imageVector = defaultDeleteIcon(),
                                 contentDescription = "Delete Pattern",
                                 tint = AlertRed.copy(alpha = 0.8f),
                                 modifier = Modifier
@@ -563,7 +563,7 @@ fun PatternsCard(
     }
 }
 
-fun androidx.compose.material3.assist.defaultDeleteIcon(): androidx.compose.ui.graphics.vector.ImageVector {
+fun defaultDeleteIcon(): androidx.compose.ui.graphics.vector.ImageVector {
     return androidx.compose.ui.graphics.vector.ImageVector.Builder(
         name = "DeleteIcon",
         defaultWidth = 24.dp,

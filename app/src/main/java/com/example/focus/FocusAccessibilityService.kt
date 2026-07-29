@@ -18,8 +18,8 @@ class FocusAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var isPolling = false
     private var lastBlockTime = 0L
-    private const val BLOCK_COOLDOWN_MS = 2000L
-    private const val POLLING_INTERVAL_MS = 400L
+    private val BLOCK_COOLDOWN_MS = 2000L
+    private val POLLING_INTERVAL_MS = 400L
 
     private val pollingRunnable = object : Runnable {
         override fun run() {
