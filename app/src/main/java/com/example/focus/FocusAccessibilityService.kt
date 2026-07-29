@@ -1,7 +1,6 @@
 package com.example.focus
 
 import android.accessibilityservice.AccessibilityService
-import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
@@ -20,6 +19,9 @@ class FocusAccessibilityService : AccessibilityService() {
     private var lastBlockTime = 0L
     private val BLOCK_COOLDOWN_MS = 2000L
     private val POLLING_INTERVAL_MS = 400L
+
+    // Cache the last event text for title-based detection
+    private var lastEventTexts = mutableListOf<String>()
 
     private val pollingRunnable = object : Runnable {
         override fun run() {
@@ -50,10 +52,21 @@ class FocusAccessibilityService : AccessibilityService() {
 
         val packageName = event.packageName?.toString() ?: return
         if (packageName == "com.android.chrome") {
+            // Capture event text (Chrome sends page title here even in fullscreen)
+            event.text?.let { textList ->
+                lastEventTexts.clear()
+                for (cs in textList) {
+                    cs?.toString()?.let { lastEventTexts.add(it) }
+                }
+            }
+            // Also capture content description from the event
+            event.contentDescription?.toString()?.let {
+                if (it.isNotBlank()) lastEventTexts.add(it)
+            }
+
             startPolling()
             checkCurrentScreen()
         } else {
-            // Chrome is no longer the active app sending events
             stopPolling()
         }
     }
@@ -96,10 +109,52 @@ class FocusAccessibilityService : AccessibilityService() {
                 return
             }
 
+            val blockedPatterns = FocusPreferences.getBlockedPatterns(this)
+
+            // ── Signal 1: URL bar text (works when URL bar is visible) ──
             val url = extractChromeUrl(rootNode)
             if (url != null) {
-                evaluateUrl(url)
+                val matchedPattern = matchesBlockedPattern(url, blockedPatterns)
+                if (matchedPattern != null) {
+                    triggerBlock(url, matchedPattern)
+                    return
+                }
             }
+
+            // ── Signal 2: Page title from event text (works in fullscreen) ──
+            // Chrome broadcasts the page title in accessibility events even when
+            // the URL bar is hidden (e.g. during fullscreen Shorts playback).
+            for (eventText in lastEventTexts) {
+                val matchedPattern = matchesBlockedPattern(eventText, blockedPatterns)
+                if (matchedPattern != null) {
+                    triggerBlock(eventText, matchedPattern)
+                    return
+                }
+            }
+
+            // ── Signal 3: Deep node tree scan for text & content descriptions ──
+            // Searches ALL visible text and content descriptions across the
+            // entire Chrome accessibility tree. This catches Shorts/Reels UI
+            // elements, tab titles, page content, and any other signal that
+            // contains the blocked pattern — even with the URL bar hidden.
+            val allVisibleText = mutableListOf<String>()
+            traverseNodeTreeSafe(rootNode) { node ->
+                node.text?.toString()?.let { text ->
+                    if (text.length > 3) allVisibleText.add(text)
+                }
+                node.contentDescription?.toString()?.let { desc ->
+                    if (desc.length > 3) allVisibleText.add(desc)
+                }
+            }
+
+            for (text in allVisibleText) {
+                val matchedPattern = matchesBlockedPattern(text, blockedPatterns)
+                if (matchedPattern != null) {
+                    triggerBlock(text, matchedPattern)
+                    return
+                }
+            }
+
         } catch (e: Exception) {
             // Graceful no-op
         } finally {
@@ -163,31 +218,26 @@ class FocusAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun evaluateUrl(url: String) {
+    private fun triggerBlock(detectedText: String, matchedPattern: String) {
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastBlockTime < BLOCK_COOLDOWN_MS) {
             return
         }
 
-        val blockedPatterns = FocusPreferences.getBlockedPatterns(this)
-        val matchedPattern = matchesBlockedPattern(url, blockedPatterns)
+        lastBlockTime = currentTime
 
-        if (matchedPattern != null) {
-            lastBlockTime = currentTime
-            
-            // Execute global back action to redirect user out of the blocked content
-            performGlobalAction(GLOBAL_ACTION_BACK)
-            
-            // Log block event
-            dbHelper.logBlockEvent(url, matchedPattern)
-        }
+        // Execute global back action to redirect user out of the blocked content
+        performGlobalAction(GLOBAL_ACTION_BACK)
+
+        // Log block event
+        dbHelper.logBlockEvent(detectedText, matchedPattern)
     }
 
-    private fun matchesBlockedPattern(url: String, patterns: Set<String>): String? {
-        val cleanUrl = url.lowercase().trim()
+    private fun matchesBlockedPattern(text: String, patterns: Set<String>): String? {
+        val cleanText = text.lowercase().trim()
         for (pattern in patterns) {
             val cleanPattern = pattern.lowercase().trim()
-            if (cleanPattern.isNotEmpty() && cleanUrl.contains(cleanPattern)) {
+            if (cleanPattern.isNotEmpty() && cleanText.contains(cleanPattern)) {
                 return pattern
             }
         }
