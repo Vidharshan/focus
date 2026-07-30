@@ -1,6 +1,7 @@
 package com.example.focus
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
@@ -19,9 +20,6 @@ class FocusAccessibilityService : AccessibilityService() {
     private var lastBlockTime = 0L
     private val BLOCK_COOLDOWN_MS = 2000L
     private val POLLING_INTERVAL_MS = 400L
-
-    // Cache the last event text for title-based detection
-    private var lastEventTexts = mutableListOf<String>()
 
     private val pollingRunnable = object : Runnable {
         override fun run() {
@@ -52,18 +50,6 @@ class FocusAccessibilityService : AccessibilityService() {
 
         val packageName = event.packageName?.toString() ?: return
         if (packageName == "com.android.chrome") {
-            // Capture event text (Chrome sends page title here even in fullscreen)
-            event.text?.let { textList ->
-                lastEventTexts.clear()
-                for (cs in textList) {
-                    cs?.toString()?.let { lastEventTexts.add(it) }
-                }
-            }
-            // Also capture content description from the event
-            event.contentDescription?.toString()?.let {
-                if (it.isNotBlank()) lastEventTexts.add(it)
-            }
-
             startPolling()
             checkCurrentScreen()
         } else {
@@ -72,7 +58,7 @@ class FocusAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        // Required method
+        // Required
     }
 
     override fun onDestroy() {
@@ -111,7 +97,7 @@ class FocusAccessibilityService : AccessibilityService() {
 
             val blockedPatterns = FocusPreferences.getBlockedPatterns(this)
 
-            // ── Signal 1: URL bar text (works when URL bar is visible) ──
+            // --- 1. Direct URL check ---
             val url = extractChromeUrl(rootNode)
             if (url != null) {
                 val matchedPattern = matchesBlockedPattern(url, blockedPatterns)
@@ -121,53 +107,111 @@ class FocusAccessibilityService : AccessibilityService() {
                 }
             }
 
-            // ── Signal 2: Page title from event text (works in fullscreen) ──
-            // Chrome broadcasts the page title in accessibility events even when
-            // the URL bar is hidden (e.g. during fullscreen Shorts playback).
-            for (eventText in lastEventTexts) {
-                val matchedPattern = matchesBlockedPattern(eventText, blockedPatterns)
-                if (matchedPattern != null) {
-                    triggerBlock(eventText, matchedPattern)
-                    return
+            // --- 2. Score-based layout heuristics (if URL is hidden/missing) ---
+            val score = calculateHeuristicScore(rootNode)
+            if (score >= 4) {
+                var logMsg = "Shorts/Reels detected (heuristic score: $score)"
+                if (url != null) {
+                    logMsg += " at $url"
                 }
-            }
-
-            // ── Signal 3: Deep node tree scan for text & content descriptions ──
-            // Searches ALL visible text and content descriptions across the
-            // entire Chrome accessibility tree. This catches Shorts/Reels UI
-            // elements, tab titles, page content, and any other signal that
-            // contains the blocked pattern — even with the URL bar hidden.
-            val allVisibleText = mutableListOf<String>()
-            traverseNodeTreeSafe(rootNode) { node ->
-                node.text?.toString()?.let { text ->
-                    if (text.length > 3) allVisibleText.add(text)
-                }
-                node.contentDescription?.toString()?.let { desc ->
-                    if (desc.length > 3) allVisibleText.add(desc)
-                }
-            }
-
-            for (text in allVisibleText) {
-                val matchedPattern = matchesBlockedPattern(text, blockedPatterns)
-                if (matchedPattern != null) {
-                    triggerBlock(text, matchedPattern)
-                    return
-                }
+                triggerBlock(logMsg, "layout heuristics")
             }
 
         } catch (e: Exception) {
-            // Graceful no-op
+            // Graceful error isolation
         } finally {
             try {
                 rootNode.recycle()
             } catch (e: Exception) {
-                // Ignore recycle exceptions for already disposed nodes
+                // Ignore
             }
         }
     }
 
+    private fun calculateHeuristicScore(rootNode: AccessibilityNodeInfo): Int {
+        var score = 0
+        var hasRemix = false
+        var hasReelUiNode = false
+        var hasPortraitVideo = false
+        val rightRailButtons = ArrayList<Rect>()
+
+        val displayMetrics = resources.displayMetrics
+        val screenWidth = displayMetrics.widthPixels
+        val screenHeight = displayMetrics.heightPixels
+
+        traverseNodeTreeSafe(rootNode) { node ->
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+
+            val text = node.text?.toString()?.lowercase() ?: ""
+            val contentDesc = node.contentDescription?.toString()?.lowercase() ?: ""
+            val viewId = node.viewIdResourceName?.lowercase() ?: ""
+
+            // Heuristic 1: DOM UI node identifiers
+            if (viewId.contains("ytd-shorts") || viewId.contains("ytd-reel-video-renderer") ||
+                viewId.contains("shorts-player") || viewId.contains("reel-video") ||
+                viewId.contains("shorts-container") || viewId.contains("reel_") ||
+                text.contains("ytd-shorts") || contentDesc.contains("ytd-shorts")) {
+                hasReelUiNode = true
+            }
+
+            // Heuristic 2: "Remix" keyword (highly unique to Shorts)
+            if (text == "remix" || contentDesc == "remix" || text.contains("remix") || contentDesc.contains("remix")) {
+                hasRemix = true
+            }
+
+            // Heuristic 3: Portrait Video Surface
+            val width = bounds.width()
+            val height = bounds.height()
+            if (width > 0 && height > 0) {
+                val aspect = width.toFloat() / height.toFloat()
+                val heightRatio = height.toFloat() / screenHeight.toFloat()
+                // A vertical player occupying >70% of screen height
+                if (aspect < 0.75f && heightRatio > 0.7f) {
+                    // Exclude complete screen parent overlays if they are not the player
+                    if (bounds.top > 0 || bounds.bottom < screenHeight || width < screenWidth) {
+                        hasPortraitVideo = true
+                    }
+                }
+
+                // Heuristic 4: Right-rail action buttons (Like, Dislike, Comments, Share, Remix, Audio)
+                // Positioned on the right side (x > 75% of screen width)
+                val rightThreshold = (screenWidth * 0.75f).toInt()
+                if (bounds.left > rightThreshold && width < screenWidth * 0.22f && height < screenHeight * 0.15f) {
+                    rightRailButtons.add(Rect(bounds))
+                }
+            }
+        }
+
+        if (hasRemix) score += 3
+        if (hasReelUiNode) score += 2
+        if (hasPortraitVideo) score += 2
+
+        // Count vertically stacked icons in right rail
+        if (rightRailButtons.size >= 3) {
+            rightRailButtons.sortBy { it.top }
+            var stackCount = 1
+            var maxStack = 1
+            for (i in 0 until rightRailButtons.size - 1) {
+                val current = rightRailButtons[i]
+                val next = rightRailButtons[i + 1]
+                // Stacked if horizontal alignment is within 80px and next is below current
+                if (Math.abs(current.left - next.left) < 80 && next.top > current.bottom) {
+                    stackCount++
+                    if (stackCount > maxStack) maxStack = stackCount
+                } else {
+                    stackCount = 1
+                }
+            }
+            if (maxStack >= 3) {
+                score += 2
+            }
+        }
+
+        return score
+    }
+
     private fun extractChromeUrl(rootNode: AccessibilityNodeInfo): String? {
-        // Method 1: Find Chrome's URL bar by exact view ID (most common)
         try {
             val urlNodes = rootNode.findAccessibilityNodeInfosByViewId("com.android.chrome:id/url_bar")
             if (urlNodes != null && urlNodes.isNotEmpty()) {
@@ -180,10 +224,9 @@ class FocusAccessibilityService : AccessibilityService() {
                 }
             }
         } catch (e: Exception) {
-            // Silently fall back to traversal
+            // Fallback
         }
 
-        // Method 2: Traverse node tree searching for standard URL bars and inputs
         val foundUrls = ArrayList<String>()
         traverseNodeTreeSafe(rootNode) { node ->
             val viewId = node.viewIdResourceName
@@ -191,7 +234,6 @@ class FocusAccessibilityService : AccessibilityService() {
                 node.text?.toString()?.let { foundUrls.add(it) }
             }
 
-            // Fallback for inputs with domain names
             if (node.className == "android.widget.EditText") {
                 val text = node.text?.toString()
                 if (text != null && (text.contains("http") || text.contains("www.") || text.contains(".com") || text.contains(".org") || text.contains(".net"))) {
@@ -214,7 +256,7 @@ class FocusAccessibilityService : AccessibilityService() {
                 } catch (e: Exception) {}
             }
         } catch (e: Exception) {
-            // Silently swallow errors during node traversal to remain resilient
+            // Swallow
         }
     }
 
@@ -225,19 +267,15 @@ class FocusAccessibilityService : AccessibilityService() {
         }
 
         lastBlockTime = currentTime
-
-        // Execute global back action to redirect user out of the blocked content
         performGlobalAction(GLOBAL_ACTION_BACK)
-
-        // Log block event
         dbHelper.logBlockEvent(detectedText, matchedPattern)
     }
 
-    private fun matchesBlockedPattern(text: String, patterns: Set<String>): String? {
-        val cleanText = text.lowercase().trim()
+    private fun matchesBlockedPattern(url: String, patterns: Set<String>): String? {
+        val cleanUrl = url.lowercase().trim()
         for (pattern in patterns) {
             val cleanPattern = pattern.lowercase().trim()
-            if (cleanPattern.isNotEmpty() && cleanText.contains(cleanPattern)) {
+            if (cleanPattern.isNotEmpty() && cleanUrl.contains(cleanPattern)) {
                 return pattern
             }
         }
